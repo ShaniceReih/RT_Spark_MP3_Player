@@ -1,60 +1,46 @@
 # RT-Spark Personal MP3 Player
 
-A real-time embedded music player developed for the **RT-Spark STM32F407ZG** board using **FreeRTOS**, STM32Cube, PlatformIO, the ES8388 audio codec, onboard LCD, pushbuttons, potentiometer volume control, and external RGB LEDs.
+A real-time embedded music player for the **RT-Spark STM32F407ZG** board, built with **FreeRTOS**, STM32Cube and PlatformIO. The final firmware uses the ES8388 audio codec, onboard LCD, four selection buttons, a dedicated USER_BUTTON, potentiometer volume control and external RGB LEDs.
 
-The project supports **8 selectable songs**, real-time audio playback, binary song selection, pause/resume control, adjustable volume, LCD feedback, and RGB status indication.
-
----
+The current, physically verified submission firmware is **`rtos_stage6_user_button`**. It plays eight songs from synthesized note/beat data; it does not decode MP3 files.
 
 ## Features
 
-- FreeRTOS-based embedded application
-- 3 concurrent application tasks
-- 8-song binary selection using pushbuttons
-- 5-second song confirmation window
-- Continuous PCM audio playback using DMA
+- Exactly three FreeRTOS application tasks
+- Eight-song binary selection with capture, release-all gating and a five-second confirmation window
+- Continuous synthesized stereo PCM playback through I2S3 and audio DMA
 - ES8388 audio codec
-- Potentiometer-controlled volume
-- Pause/resume playback
-- 240×240 ST7789 LCD interface
-- Purple/lavender music-player UI
+- Dedicated PA0 USER_BUTTON for Stop / Replay from beginning
+- Long-UP Pause / Resume from the retained playback position
+- Potentiometer-controlled volume with filtering and deadband
+- Onboard 240 x 240 ST7789 LCD with a purple/lavender music-player UI
+- Song selection, confirmation, playing, paused and timeout screens
+- Volume overlay and volume bar
 - External RGB playback indicators
-- Volume overlay
-- Song selection and confirmation screens
-- Runtime stack and heap monitoring
-- Host-based unit and regression tests
-
----
+- Runtime task, stack and heap monitoring
+- Host unit and regression tests
 
 ## FreeRTOS Architecture
 
-The application is divided into three main FreeRTOS tasks.
+The final application has exactly three application tasks. USER_BUTTON belongs to `PollButtonsTask`; it does not add a fourth task.
 
 | Task | Priority | Stack | Responsibility |
-|---|---:|---:|---|
-| `PollButtonsTask` | 3 | 1024 words | Buttons, song selection, player state, playback transport and state publication |
-| `AdjustVolumeTask` | 2 | 768 words | ADC sampling, filtering, accepted volume and codec volume updates |
-| `UpdateLcdLedsTask` | 1 | 1024 words | LCD interface, PlayerUI and external RGB LED updates |
+| --- | ---: | ---: | --- |
+| `PollButtonsTask` | 3 | 1,024 words | Selection buttons, USER_BUTTON, song selection, player state, audio transport/service and state publication |
+| `AdjustVolumeTask` | 2 | 768 words | PF6 ADC sampling, filtering, accepted volume and codec volume writes |
+| `UpdateLcdLedsTask` | 1 | 1,024 words | All runtime LCD/PlayerUI rendering and external RGB LED updates |
 
-Audio playback itself remains DMA/interrupt-driven rather than using a fourth application task.
+Audio DMA callbacks remain interrupt-driven. They do not call FreeRTOS APIs, and DMA1 Stream5 remains at interrupt priority 5.
 
 ### Synchronization
 
-The firmware uses separate synchronization objects for:
-
-- player state
-- ES8388 codec access
-- LCD access
-
-The UI task first copies a consistent player snapshot, releases the state mutex, and only then performs LCD rendering.
-
----
+Separate mutexes protect player-state publication, ES8388 codec access and LCD access. The UI task copies a consistent player snapshot, releases the state mutex, and then renders under the LCD mutex. The existing five-second confirmation timeout remains in the player controller; it uses no FreeRTOS software timer.
 
 ## System Architecture
 
 ```text
                      +----------------------+
-                     |     FreeRTOS         |
+                     |       FreeRTOS       |
                      +----------+-----------+
                                 |
              +------------------+------------------+
@@ -66,9 +52,9 @@ The UI task first copies a consistent player snapshot, releases the state mutex,
    +--------+---------+ +--------+---------+ +----------+-----------+
             |                    |                      |
             v                    v                      v
-       Pushbuttons          PF6 / ADC3              LCD + RGB LEDs
-       Song control         Volume filter           Player interface
-       Player state         ES8388 volume           Status display
+   Selection + USER_BUTTON  PF6 / ADC3              LCD + RGB LEDs
+   Song control             Volume filter           Player interface
+   Player state             ES8388 volume           Status display
             |
             v
       Audio transport
@@ -81,167 +67,154 @@ The UI task first copies a consistent player snapshot, releases the state mutex,
             |
             v
        Audio output
+```
 
-Hardware
-Main Board
-- RT-Spark
-- STM32F407ZGT6
-- ARM Cortex-M4
-- 240×240 ST7789 LCD
+## Hardware
+
+### Main Board
+
+- RT-Spark with STM32F407ZGT6, ARM Cortex-M4
+- Onboard 240 x 240 ST7789 LCD
 - ES8388 audio codec
-Additional Components
-- 10 kΩ potentiometer
-- External RGB LEDs
-- Current-limiting resistors
+
+### Additional Components
+
+- 10 kOhm potentiometer
+- External red, green and blue LEDs with current-limiting resistors
 - Speaker / headphones
-- Pushbutton controls
-Pin Mapping
-Pushbuttons
-Control	STM32 Pin
-UP	PC5
-DOWN	PC1
-LEFT	PC0
-RIGHT	PC4
+- Normally-open external USER_BUTTON
 
+### USER_BUTTON Wiring
 
-Potentiometer
-Function	Pin
-Volume input	PF6
-ADC	ADC3 Channel 4
+```text
+PA0 / P2 pin 12 ---- normally-open pushbutton ---- GND / P2 pin 6
+```
 
+PA0 is configured as `GPIO_MODE_INPUT` with `GPIO_PULLUP`. The STM32 internal pull-up holds the released button HIGH; pressing the button connects PA0 to GND and reads LOW. No external pull-up resistor is required.
 
-ADC resolution:
-0 – 4095
+The control task polls at approximately 20 ms intervals and uses 25 ms debounce. A held button produces one action. If held at boot, it produces no new press action and must be released before a later press can act. USER_BUTTON uses polling only, with no EXTI or button interrupt.
 
-External RGB LEDs
-Color	STM32 Pin
-Red	PA8
-Green	PA1
-Blue	PB14
+## Pin Mapping
 
+### Pushbuttons
 
-LED behavior:
-State	LED
-Playing	Blue
-Paused	Red
-Selecting / Confirming	Green
-Idle	Off
+| Control | STM32 pin / connector | Function |
+| --- | --- | --- |
+| UP | PC5 | Capture / confirm; long-UP Pause / Resume |
+| DOWN | PC1 | Selection bit 2 |
+| LEFT | PC0 | Selection bit 1 |
+| RIGHT | PC4 | Selection bit 0 |
+| USER_BUTTON | PA0 / P2 pin 12 | Active LOW, internal pull-up; Stop / Replay from beginning |
 
+### Potentiometer
 
-ES8388 Software I2C
-Signal	Pin
-SCL / SDA resources	PF0 / PF1
+| Function | Pin / peripheral |
+| --- | --- |
+| Volume input | PF6 |
+| ADC | ADC3 Channel 4 |
+| Resolution | 12 bits, raw values 0-4095 |
 
+### External RGB LEDs
 
-I2S3 Audio
-Audio output uses I2S3 with DMA.
-Relevant pins include:
-- PA15
-- PB3
-- PB5
-- PC7
-Audio DMA:
-DMA1 Stream5
-Channel 0
+| Color | STM32 pin |
+| --- | --- |
+| RED | PA8 |
+| GREEN | PA1 |
+| BLUE | PB14 |
 
-Song Selection
-Three buttons represent a 3-bit binary song number.
-DOWN  = bit 2
-LEFT  = bit 1
-RIGHT = bit 0
+| Player state | LED indication |
+| --- | --- |
+| Playing | BLUE on |
+| Paused | RED on |
+| Selecting / confirming | GREEN on |
+| Idle | All off |
 
-Binary	Song
-000	Fur Elise - Beethoven
-001	Canon In D - Pachebelbel
-010	Minuet in G major - Bach
-011	Turkish March - Mozart
-100	Nocturne in E flat - Chopin
-101	Waltz No. 2 - Shostakovich
-110	Nocturne in C sharp - Chopin
-111	Symphony No. 40 - Mozart
+### Audio and UART
 
+| Peripheral / signal | STM32 pin |
+| --- | --- |
+| ES8388 software I2C SCL | PF1 |
+| ES8388 software I2C SDA | PF0 |
+| I2S3 WS | PA15 |
+| I2S3 CK | PB3 |
+| I2S3 SD | PB5 |
+| I2S3 MCLK | PC7 |
+| UART1 TX | PA9 |
+| UART1 RX | PA10 |
 
-Song Selection Procedure
+Audio uses **DMA1 Stream5, Channel 0**. The onboard LCD uses its existing FSMC interface.
+
+## Song Selection
+
+DOWN, LEFT and RIGHT form a three-bit binary song number. UP captures and confirms it.
+
+| Binary | Song |
+| --- | --- |
+| 000 | Fur Elise - Beethoven |
+| 001 | Canon In D - Pachebelbel |
+| 010 | Minuet in G major - Bach |
+| 011 | Turkish March - Mozart |
+| 100 | Nocturne in E flat - Chopin |
+| 101 | Waltz No. 2 - Shostakovich |
+| 110 | Nocturne in C sharp - Chopin |
+| 111 | Symphony No. 40 - Mozart |
+
+### Selection Procedure
+
 1. Set the desired binary value using DOWN, LEFT and RIGHT.
 2. Press UP to capture the selection.
-3. Release all buttons.
-4. Press UP again within 5 seconds.
+3. Release all selection buttons.
+4. Press UP again within five seconds to confirm.
 5. The selected song begins playing.
-Example:
-LEFT + RIGHT
-= 011
-= Turkish March - Mozart
 
-A timeout automatically cancels the selection if confirmation is not received within 5 seconds.
-Playback Controls
-Song Selection
-DOWN  = bit 2
-LEFT  = bit 1
-RIGHT = bit 0
-UP    = capture / confirm
+For example, LEFT + RIGHT gives `011`, Turkish March - Mozart. The captured candidate remains fixed during confirmation. If confirmation is not received within five seconds, the controller cancels the selection and displays the timeout notice.
 
-Pause / Resume
-Hold UP for approximately one second.
-PLAYING -> long UP -> PAUSED
-PAUSED  -> long UP -> PLAYING
+## Playback Controls
 
-Playback resumes from the previous position.
-Volume Control
-Volume is controlled using a potentiometer connected to:
-PF6 -> ADC3 Channel 4
+### Long UP: Pause / Resume
 
-The volume system includes:
-- 12-bit ADC sampling
-- 4-sample filtering
-- deadband protection
-- accepted-volume tracking
-- codec-safe volume updates
-The physically observed potentiometer range is approximately:
-8% – 100%
+Hold UP for approximately one second, then release, to toggle playback:
 
-This range has intentionally not been recalibrated during the FreeRTOS migration.
-LCD Interface
-The project uses the onboard 240×240 ST7789 LCD.
-The interface includes:
-- startup screen
-- ready screen
-- binary song-selection display
-- captured-song screen
-- release-all prompt
-- confirmation countdown
-- now-playing screen
-- paused screen
-- timeout/cancellation notice
-- volume overlay
-Purple Music Player UI
-A redesigned purple/lavender interface was added after the verified FreeRTOS baseline.
-The UI includes:
-- dark-purple background
-- lavender accents
-- music-note graphics
-- play and pause icons
-- speaker icon
-- rounded visual panels
-- binary selection boxes
-- purple volume bar
-- improved spacing and hierarchy
-The redesigned UI is implemented in:
-src/player_ui_purple.cpp
+| Current state | Long-UP result |
+| --- | --- |
+| PLAYING | PAUSED |
+| PAUSED | PLAYING, continuing from the retained playback position |
 
-Firmware environment:
-rtos_stage5_purple_ui
+### Dedicated USER_BUTTON: Stop / Replay from Beginning
 
-Purple UI resource usage:
-Resource	Usage
-Flash	47,344 bytes
-RAM	48,392 bytes
+| Current situation | Qualified USER_BUTTON press |
+| --- | --- |
+| PLAYING | STOP / IDLE; retain the confirmed song |
+| PAUSED | STOP / IDLE; retain the confirmed song |
+| IDLE with a previously confirmed song | Replay that same song from the beginning |
+| IDLE before any song has been confirmed | No action |
+| After natural song completion | Replay the last confirmed song from the beginning |
 
+Each STOP or REPLAY requires a separate press. Holding the button after STOP does not immediately replay the song; release rearms the input.
 
-The redesign increased Flash usage by approximately 1,288 bytes while RAM usage remained unchanged.
-Audio Architecture
-Songs are generated from synthesized musical-note data.
-The project does not decode MP3 files.
-Audio flow:
+Selection has priority. USER_BUTTON is ignored/consumed while selection is active, including capture, release-all and the five-second confirmation phase. A press held during selection does not fire later when selection ends or times out. Release the button, then press again for a normal action. Simultaneous selection inputs take priority over USER_BUTTON.
+
+**Long UP = Pause / Resume. USER_BUTTON = Stop / Replay from beginning.**
+
+## Volume Control
+
+Volume comes from the potentiometer on PF6 / ADC3 Channel 4. The implementation uses 12-bit ADC sampling, a four-sample filter, deadband protection, accepted-volume tracking and codec-safe volume writes. The logical volume range is 0-100%.
+
+The physically observed potentiometer range is approximately **8-100%**. This observed range has intentionally not been recalibrated during the FreeRTOS migration or USER_BUTTON integration. Volume adjustment remains available while playing and paused.
+
+## LCD Interface
+
+The onboard 240 x 240 ST7789 LCD presents startup, audio-ready, idle, binary selection, captured-song/release-all, confirmation countdown, now-playing, paused and timeout screens, plus a temporary volume overlay.
+
+The final firmware includes the purple/lavender renderer in `src/player_ui_purple.cpp`. It uses a dark-purple background, lavender accents, music notes, play/pause/speaker icons, rounded visual panels, binary selection boxes and a purple volume bar. Title wrapping, bounded text rendering and cached partial updates keep the interface readable without redrawing the full LCD every polling cycle.
+
+`UpdateLcdLedsTask` remains the only runtime owner of the UI and RGB LED presentation.
+
+## Audio Architecture
+
+Songs use synthesized musical-note and beat tables. Audio runs through the following path:
+
+```text
 Song note / beat tables
         |
         v
@@ -251,107 +224,166 @@ PCM waveform generation
 Stereo audio buffer
         |
         v
-I2S3
-        |
-        v
-DMA1 Stream5
+I2S3 + DMA1 Stream5
         |
         v
 ES8388 codec
         |
         v
 Speaker / headphones
+```
 
-DMA operates continuously while the FreeRTOS application tasks handle controls, volume and presentation.
-Building the Project
-The project uses PlatformIO with STM32Cube.
-Example PowerShell configuration:
-$pio = 'C:\Users\tanqu\.platformio\penv\Scripts\platformio.exe'
+DMA maintains audio output while the three application tasks handle controls, volume and presentation.
 
-Verified Stage-5 Firmware
-& $pio run -e rtos_stage5_player
+## Building the Project
 
-Upload:
-& $pio run -e rtos_stage5_player -t upload
+Use PlatformIO from the project root. The final environment is `rtos_stage6_user_button`, and `platformio.ini` sets it as `default_envs`.
 
-Serial monitor:
-& $pio device monitor -e rtos_stage5_player --baud 115200
+Build the final firmware using the default:
 
-Purple UI Firmware
-Build:
-& $pio run -e rtos_stage5_purple_ui
+```sh
+pio run
+```
 
-Upload:
-& $pio run -e rtos_stage5_purple_ui -t upload
+Build it explicitly:
 
-Monitor:
-& $pio device monitor -e rtos_stage5_purple_ui --baud 115200
+```sh
+pio run -e rtos_stage6_user_button
+```
 
-Testing
-Testing includes both host-side tests and physical-board verification.
-The verified FreeRTOS system has been tested for:
-- task startup
-- all eight binary selections
-- release gating
-- 5-second confirmation timeout
-- pause/resume
-- volume while playing
-- volume while paused
-- song completion
-- LCD updates
-- RGB LED transitions
-- state synchronization
-- mutex behavior
-- heap stability
-- stack headroom
-- rapid potentiometer changes
-- rapid control interaction
-- audio continuity
-The purple PlayerUI also includes a dedicated host-test suite.
-Verified Runtime Health
-During Stage-5 physical testing, all three application tasks remained active with positive stack headroom and stable heap usage.
-Example monitored values included approximately:
-BUTTON_STACK ≈ 570 words free
-VOLUME_STACK ≈ 715 words free
-LCD_STACK    ≈ 670 words free
+Upload through the configured ST-Link interface:
 
-HEAP         ≈ 19,816 bytes
-MIN_HEAP     ≈ 19,816 bytes
+```sh
+pio run -e rtos_stage6_user_button -t upload
+```
 
-The stable minimum heap value showed no observed runtime memory leak during the test session.
-Project Structure
+Open the serial monitor:
+
+```sh
+pio device monitor -e rtos_stage6_user_button --baud 115200
+```
+
+Close the serial monitor before uploading. Reset the board after opening the monitor to capture startup messages, including `STAGE 6: USER_BUTTON STOP/REPLAY ACTIVE`.
+
+### Recovery and Test Environments
+
+All nine environments remain available:
+
+| Environment | Purpose |
+| --- | --- |
+| `black_f407zg` | Original bare-metal player recovery |
+| `rtos_stage1_smoke` | FreeRTOS kernel / tick smoke test |
+| `rtos_stage2_player` | Full player under the scheduler with three task shells |
+| `rtos_stage3_player` | Control-state task separation |
+| `rtos_stage4_player` | Dedicated volume task and codec synchronization |
+| `rtos_stage5_player` | Completed three-task split with the original UI |
+| `rtos_stage5_purple_ui` | Purple UI checkpoint before USER_BUTTON integration |
+| `user_button_smoke` | Isolated PA0 hardware / debounce test |
+| `rtos_stage6_user_button` | **Final verified submission firmware; default environment** |
+
+For example, restore the purple checkpoint with:
+
+```sh
+pio run -e rtos_stage5_purple_ui -t upload
+```
+
+To build every environment in one command:
+
+```sh
+pio run -e black_f407zg -e rtos_stage1_smoke -e rtos_stage2_player -e rtos_stage3_player -e rtos_stage4_player -e rtos_stage5_player -e rtos_stage5_purple_ui -e user_button_smoke -e rtos_stage6_user_button
+```
+
+## Testing and Validation
+
+Final validation passed:
+
+- All **nine PlatformIO environments** build successfully.
+- All **14 host test suites** pass.
+- Builds and host validation have **zero warnings/errors**.
+- The default and explicit Stage-6 builds produce identical firmware.
+- The eight older recovery/test environments remain unchanged; their BIN files match the committed pre-cleanup firmware rebuilt in an isolated directory.
+
+Host test commands and scope are documented in [tests/README.md](tests/README.md). The suites cover audio DMA, selection, legacy and purple UI rendering, potentiometer filtering/ADC, player state, codec synchronization, presentation, formatting, USER_BUTTON debounce, policy and audio transport integration.
+
+### Physical Verification
+
+The final Stage-6 USER_BUTTON firmware passed physical testing on the RT-Spark board:
+
+- PA0 press/release detection, debounce and boot-held suppression
+- PLAYING -> STOP and PAUSED -> STOP
+- Replay of the retained song from the beginning
+- Natural song completion followed by replay
+- Repeated STOP / REPLAY cycles
+- USER_BUTTON suppression during active selection
+- Held presses consumed during selection and still suppressed after timeout
+- Stable release rearming the button
+- Unchanged long-UP Pause / Resume
+- Stable RTOS heap and task stack headroom
+
+Broader physical verification also passed: all eight binary song selections, capture/release-all/confirmation, the five-second timeout, potentiometer volume while playing and paused, LCD screens and overlay, RGB LED transitions, song completion and continuous audio. The three tasks remained active with stable heap/stacks and no observed scheduler freeze, HardFault or reboot loop.
+
+The development-stage checklists remain in [docs/user_button_smoke_testing.md](docs/user_button_smoke_testing.md), [docs/user_button_player_testing.md](docs/user_button_player_testing.md), [docs/purple_ui_testing.md](docs/purple_ui_testing.md) and [docs/freertos_testing.md](docs/freertos_testing.md). Those guides retain their stage-specific history; the completed final status is recorded here.
+
+### Final Resource Usage
+
+| Firmware | Flash | Static RAM |
+| --- | ---: | ---: |
+| **Final `rtos_stage6_user_button`** | **48,384 bytes** | **48,408 bytes** |
+| Historical `rtos_stage5_purple_ui` checkpoint | 47,344 bytes | 48,392 bytes |
+
+### Historical Stage-5 Runtime Sample
+
+During Stage-5 physical testing, the tasks had positive stack headroom and stable heap usage. These sample values are historical measurements, not new Stage-6 measurements:
+
+| Diagnostic | Approximate value |
+| --- | ---: |
+| BUTTON_STACK | 570 words free |
+| VOLUME_STACK | 715 words free |
+| LCD_STACK | 670 words free |
+| HEAP | 19,816 bytes free |
+| MIN_HEAP | 19,816 bytes free |
+
+Stage-6 physical testing likewise confirmed stable heap and stacks without introducing a fourth application task.
+
+## Project Structure
+
+```text
 RT_Spark_MP3_Player_ButtonVolume/
-|
-+-- include/
-|   +-- application headers
-|
-+-- src/
-|   +-- main.cpp
-|   +-- audio implementation
-|   +-- FreeRTOS task modules
-|   +-- player state
-|   +-- LCD / UI code
-|   +-- player_ui.cpp
-|   +-- player_ui_purple.cpp
-|
-+-- tests/
-|   +-- host regression tests
-|   +-- UI tests
-|
-+-- docs/
-|   +-- FreeRTOS migration documentation
-|   +-- hardware testing documentation
-|   +-- purple UI testing
-|
-+-- scripts/
-|
-+-- platformio.ini
-|
-+-- README.md
+|-- include/
+|   |-- FreeRTOSConfig.h
+|   |-- song.h, song_def.h, song_selection.h
+|   |-- player_state.h, player_presentation.h, potentiometer_filter.h
+|   `-- user_button_debounce.h, user_button_policy.h
+|-- src/
+|   |-- main.cpp
+|   |-- audio_codec.cpp / .h
+|   |-- player_tasks*.cpp / .h, player_state*.cpp
+|   |-- codec_control.cpp / .h, lcd_control.cpp / .h
+|   |-- lcd_display.cpp / .h, player_ui.cpp, player_ui_purple.cpp
+|   |-- player_presentation.cpp, player_leds.cpp / .h
+|   |-- potentiometer_volume.cpp / .h
+|   |-- user_button_player.cpp, user_button_player.h
+|   `-- user_button_smoke.cpp
+|-- tests/
+|   |-- audio, selection, state, UI, volume and synchronization host tests
+|   |-- user_button_smoke_host.cpp
+|   |-- user_button_policy_host.cpp, user_button_audio_host.cpp
+|   `-- README.md
+|-- docs/
+|   |-- FreeRTOS migration and hardware testing guides
+|   |-- purple_ui_testing.md
+|   |-- user_button_smoke_testing.md
+|   `-- user_button_player_testing.md
+|-- scripts/
+|-- platformio.ini
+`-- README.md
+```
 
-Development History
-The project was first developed as a working embedded music player and was then migrated incrementally to FreeRTOS.
-Major development milestones:
+## Development History
+
+The player was built and physically verified before an incremental FreeRTOS migration.
+
+```text
 Working embedded player
         |
         v
@@ -371,31 +403,45 @@ Dedicated LCD/LED task
         |
         v
 Purple music-player UI
+        |
+        v
+Dedicated USER_BUTTON hardware smoke test
+        |
+        v
+Stage-6 stop/replay integration
+        |
+        v
+Physical Stage-6 verification
+```
 
-A verified Stage-5 checkpoint is preserved with the Git tag:
-stage5-verified
+The Git tag **`stage5-verified`** preserves the historical Stage-5 checkpoint. Stage 6 is the current final firmware.
 
-Current Status
-FreeRTOS integration       COMPLETE
-Three application tasks    COMPLETE
-8-song selection           COMPLETE
-Audio playback             COMPLETE
-Potentiometer volume       COMPLETE
-LCD interface              COMPLETE
-RGB LED indicators         COMPLETE
-Purple PlayerUI            COMPLETE
-Physical Stage-5 tests     PASSED
+## Current Status
 
-Pending Hardware Item
-The laboratory documentation mentions a dedicated USER_BUTTON for stop/play behavior.
-The current implementation uses long-UP for pause/resume.
-A dedicated external USER_BUTTON implementation is therefore being kept as a possible final hardware-compliance addition if required.
-Development Environment
+| Item | Status |
+| --- | --- |
+| FreeRTOS integration | COMPLETE |
+| Three application tasks | COMPLETE |
+| Eight-song selection | COMPLETE |
+| Audio playback | COMPLETE |
+| Potentiometer volume | COMPLETE |
+| LCD interface | COMPLETE |
+| RGB LED indicators | COMPLETE |
+| Purple PlayerUI | COMPLETE |
+| Dedicated USER_BUTTON | COMPLETE |
+| Stop / replay behavior | COMPLETE |
+| Physical Stage-6 tests | PASSED |
+| Host regression tests | PASSED |
+
+## Development Environment
+
 - Visual Studio Code
 - PlatformIO
 - STM32Cube
 - FreeRTOS
 - GCC ARM Embedded Toolchain
 - RT-Spark STM32F407ZG
-Author
+
+## Author
+
 Developed as part of the BCA182 Embedded Systems Programming laboratory activities.
