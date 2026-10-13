@@ -433,6 +433,13 @@ The Git tag **`stage5-verified`** preserves the historical Stage-5 checkpoint. S
 | Physical Stage-6 tests | PASSED |
 | Host regression tests | PASSED |
 
+
+## Laboratory Report
+
+- [Laboratory Activity 2 - Personal MP3 Player Report](docs/Laboratory_Activity_2_MP3_Player_Report.pdf)
+
+
+
 ## Development Environment
 
 - Visual Studio Code
