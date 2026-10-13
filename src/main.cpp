@@ -10,6 +10,10 @@
 #include "rtos_support.h"
 #include "player_tasks.h"
 
+#if defined(RTOS_STAGE6_USER_BUTTON) && RTOS_STAGE6_USER_BUTTON
+#include "user_button_player.h"
+#endif
+
 #if defined(RTOS_STAGE3_PLAYER) && RTOS_STAGE3_PLAYER
 #include "player_state.h"
 #if defined(RTOS_STAGE4_PLAYER) && RTOS_STAGE4_PLAYER
@@ -132,6 +136,28 @@ static void Buttons_Init(void)
 
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 }
+
+#if defined(RTOS_STAGE6_USER_BUTTON) && RTOS_STAGE6_USER_BUTTON
+// Seed before lengthy startup diagnostics; PollButtonsTask then owns this input.
+static UserButtonPolicy userButtonInput;
+static bool userButtonPreviousRaw = false;
+
+static void UserButton_Init()
+{
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitTypeDef gpio = {};
+    gpio.Pin = GPIO_PIN_0;
+    gpio.Mode = GPIO_MODE_INPUT;
+    gpio.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(GPIOA, &gpio);
+    HAL_Delay(1); // Same pull-up settling delay as the verified smoke test.
+    userButtonPreviousRaw = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET;
+    userButtonInput.initialize(userButtonPreviousRaw, HAL_GetTick());
+    uart_print(userButtonPreviousRaw
+        ? "USER_BUTTON INIT: PA0 INPUT_PULLUP RAW=LOW\r\n"
+        : "USER_BUTTON INIT: PA0 INPUT_PULLUP RAW=HIGH\r\n");
+}
+#endif
 
 /* =========================================================
    Songs
@@ -295,6 +321,9 @@ int main(void)
 #if defined(RTOS_STAGE1_SMOKE) && RTOS_STAGE1_SMOKE
     RtosSupport_StartSmokeTest(&huart1); // Isolated diagnostic; never returns.
 #endif
+#if defined(RTOS_STAGE6_USER_BUTTON) && RTOS_STAGE6_USER_BUTTON
+    UserButton_Init();
+#endif
     PlayerLeds_Init();
     PlayerLeds_StartupTest(); // Temporary verification, before any audio starts.
     Buttons_Init();
@@ -409,6 +438,10 @@ int main(void)
     uart_print("LEFT / RIGHT = Song-selection bits only\r\n");
     uart_print("Short UP alone = Select song 000\r\n");
     uart_print("Hold UP alone for 1 second, release = Pause / Resume\r\n\r\n");
+#if defined(RTOS_STAGE6_USER_BUTTON) && RTOS_STAGE6_USER_BUTTON
+    uart_print("USER_BUTTON PA0 = Stop / Replay from beginning\r\n"
+               "USER_BUTTON is ignored during song selection.\r\n\r\n");
+#endif
 
     uart_print("SONG SELECTION MODE\r\n");
     uart_print("DOWN  = bit 2\r\n");
@@ -843,6 +876,9 @@ static void RunPlayerControlLoopStage5(bool codecInitialized)
     uint32_t seenVolumeDiagnostic = 0;
     uint32_t seenVolumeError = 0;
     uart_print("STAGE 5: CONTROL TASK ACTIVE\r\n");
+#if defined(RTOS_STAGE6_USER_BUTTON) && RTOS_STAGE6_USER_BUTTON
+    uart_print("STAGE 6: USER_BUTTON STOP/REPLAY ACTIVE\r\n");
+#endif
 
     while (1)
     {
@@ -882,9 +918,23 @@ static void RunPlayerControlLoopStage5(bool codecInitialized)
         raw.down = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_1) == GPIO_PIN_RESET;
         raw.left = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_0) == GPIO_PIN_RESET;
         raw.right = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_4) == GPIO_PIN_RESET;
+#if defined(RTOS_STAGE6_USER_BUTTON) && RTOS_STAGE6_USER_BUTTON
+        const bool rawUserButton = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET;
+        const bool selectionWasActive = selectionInput.selecting();
+#endif
         const uint32_t inputNow = HAL_GetTick();
         SelectionEvents input = selectionInput.update(
             inputNow, raw, state == STATE_PLAYING || state == STATE_PAUSED);
+#if defined(RTOS_STAGE6_USER_BUTTON) && RTOS_STAGE6_USER_BUTTON
+        // Raw selection inputs reserve priority even before their debounce
+        // resolves. Include terminal events so a flow ending now still wins.
+        const bool selectionPriority = selectionWasActive || selectionInput.selecting() ||
+            raw.anyPressed() || input.captured || input.readyToConfirm ||
+            input.confirmed || input.timedOut || input.pauseResume;
+        const UserButtonAction userAction = userButtonInput.update(
+            rawUserButton, inputNow, selectionPriority,
+            state == STATE_PLAYING || state == STATE_PAUSED, publicState.hasCurrentSong);
+#endif
 
         if (input.captured)
         {
@@ -985,6 +1035,31 @@ static void RunPlayerControlLoopStage5(bool codecInitialized)
                 }
             }
         }
+
+#if defined(RTOS_STAGE6_USER_BUTTON) && RTOS_STAGE6_USER_BUTTON
+        // All selection/long-UP processing has priority. Apply at most one
+        // USER_BUTTON transport action, then publish through the existing store.
+        const UserButtonPlayerResult userResult = UserButtonPlayer_Apply(
+            userAction, publicState, songs[currentSong], inputNow);
+        if (userResult != UserButtonPlayerResult::Ignored)
+        {
+            state = publicState.mode == PlayerMode::Playing ? STATE_PLAYING : STATE_IDLE;
+            returnState = state;
+            timeoutScreenVisible = false;
+            if (userResult == UserButtonPlayerResult::Stopped)
+                uart_print("\r\nUSER_BUTTON: STOP\r\n");
+            else
+            {
+                uart_print("\r\nUSER_BUTTON: REPLAY\r\n");
+                UART_PrintBinary(currentSong);
+                uart_print("Replay from beginning: ");
+                UART_PrintSong(currentSong);
+                uart_print(userResult == UserButtonPlayerResult::Replayed
+                    ? "AUDIO: STARTING SONG (CONTINUOUS PCM/DMA)\r\n"
+                    : "AUDIO: SONG START FAILED\r\n");
+            }
+        }
+#endif
 
         // Volume task owns ADC/filter/codec writes. Poll only prints copies.
         VolumeTaskDiagnostics diagnostics;

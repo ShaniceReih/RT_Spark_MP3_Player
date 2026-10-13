@@ -208,3 +208,33 @@ accepted-volume bar widths including 0 and 100, screen restoration and partial
 updates without repeated full-screen clearing. The fixture checks LCD calls;
 actual color/readability, flicker, draw time, audio continuity and RTOS headroom
 require the board checklist in `docs/purple_ui_testing.md`.
+
+# Native Stage-6 USER_BUTTON verification
+
+The policy fixture combines the unchanged debounce and selection controller
+with the new USER_BUTTON suppression policy. Run:
+
+    & 'C:\mingw32\bin\g++.exe' -std=c++11 -O0 -g -Wall -Wextra -Werror -pedantic -I include tests/user_button_policy_host.cpp -o "$env:TEMP\rt_spark_user_button_policy_host.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
+    & "$env:TEMP\rt_spark_user_button_policy_host.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+
+It covers qualified stop/replay decisions, idle without history, release-only
+rearming, all selection phases and terminal cycles, simultaneous controls,
+presses qualified after selection ends, unchanged long-UP and boot-held behavior,
+bounce and tick wrap. It does not emulate physical switch noise.
+
+The transport fixture includes the actual Stage-6 action handler, audio engine
+and codec synchronization module, and compiles the actual presentation observer:
+
+    & 'C:\mingw32\bin\g++.exe' -std=c++17 -O0 -g -Wall -Wextra -Werror -Wno-missing-field-initializers -pedantic -DRTOS_STAGE4_PLAYER=1 -DRTOS_STAGE6_USER_BUTTON=1 -I tests/state_stubs -I tests -I src -I include tests/user_button_audio_host.cpp src/player_presentation.cpp -o "$env:TEMP\rt_spark_user_button_audio_host.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
+    & "$env:TEMP\rt_spark_user_button_audio_host.exe"
+    if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+
+Checks cover playing/paused STOP to Idle, retained song identity, no-history
+ignore, fresh first-note PCM for all eight songs, replay after natural completion,
+unchanged pause/resume cursors, safe transport/codec failures, cancellation of old
+overlays and normal Idle/all-off versus Playing/BLUE presentation. The source
+fixture includes `user_button_player.cpp` directly; do not compile it again in
+this host command. Board checks remain in `docs/user_button_player_testing.md`.
